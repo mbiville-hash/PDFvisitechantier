@@ -91,6 +91,7 @@ export function createEmptyFormData() {
     identification: {
       notionAffaireInput: '',
       affNumber: '',
+      affaireDescription: '',
       clientName: '',
       siteAddress: '',
       visitDate: todayInput(),
@@ -112,7 +113,6 @@ export function createEmptyFormData() {
     existing: {
       roomType: '',
       approximateSurface: '',
-      ceilingHeight: '',
       existingShower: '',
       existingBathtub: '',
       existingToilet: '',
@@ -154,15 +154,10 @@ export function createEmptyFormData() {
     plumbing: {
       hotWaterFound: 'Non visible',
       coldWaterFound: 'Non visible',
-      showerDrainFound: 'Non visible',
-      vanityDrainFound: 'Non visible',
-      toiletDrainFound: 'Non visible',
+      mainDrainsFound: 'Non visible',
       technicalColumnAccessible: 'À confirmer',
-      showerMovePlanned: 'À confirmer',
-      vanityMovePlanned: 'À confirmer',
-      toiletMovePlanned: 'À confirmer',
+      plannedMoves: '',
       hotWaterProduction: 'Inconnue',
-      pressureTested: 'Non testée',
       comments: '',
     },
     electrical: {
@@ -182,6 +177,9 @@ export function createEmptyFormData() {
       showerType: '',
       desiredDimensions: '',
       screen: 'À définir',
+      screenFinish: 'À définir',
+      screenProfiles: 'À définir',
+      screenDimensions: '',
       vanity: 'À définir',
       vanityInstall: 'À définir',
       taps: 'À définir',
@@ -215,13 +213,50 @@ export function createDraftVisitReport(seed = {}) {
     lastPdfGeneratedAt: seed.lastPdfGeneratedAt || '',
     pdfUrl: seed.pdfUrl || '',
     editableUrl: seed.editableUrl || buildEditableUrl(id),
-    formData: seed.formData || createEmptyFormData(),
+    formData: normalizeFormData(seed.formData),
     photos: seed.photos || createInitialPhotos(),
     completenessStatus: seed.completenessStatus || 'Incomplet',
     blockingPoints: seed.blockingPoints || [],
     materialSelectionStatus: seed.materialSelectionStatus || 'À choisir',
   }
   return refreshDraftAnalysis(draft)
+}
+
+function normalizeFormData(formData = {}) {
+  const defaults = createEmptyFormData()
+  return {
+    ...defaults,
+    ...formData,
+    identification: { ...defaults.identification, ...(formData.identification || {}) },
+    access: { ...defaults.access, ...(formData.access || {}) },
+    existing: { ...defaults.existing, ...(formData.existing || {}) },
+    measurements: { ...defaults.measurements, ...(formData.measurements || {}) },
+    structure: { ...defaults.structure, ...(formData.structure || {}) },
+    plumbing: migratePlumbing({ ...defaults.plumbing, ...(formData.plumbing || {}) }),
+    electrical: { ...defaults.electrical, ...(formData.electrical || {}) },
+    project: { ...defaults.project, ...(formData.project || {}) },
+    materials: Array.isArray(formData.materials) ? formData.materials : [],
+  }
+}
+
+function migratePlumbing(plumbing) {
+  const legacyDrains = [
+    plumbing.showerDrainFound && `Douche: ${plumbing.showerDrainFound}`,
+    plumbing.vanityDrainFound && `Vasque: ${plumbing.vanityDrainFound}`,
+    plumbing.toiletDrainFound && `WC: ${plumbing.toiletDrainFound}`,
+  ].filter(Boolean)
+
+  const legacyMoves = [
+    plumbing.showerMovePlanned && `Douche: ${plumbing.showerMovePlanned}`,
+    plumbing.vanityMovePlanned && `Vasque: ${plumbing.vanityMovePlanned}`,
+    plumbing.toiletMovePlanned && `WC: ${plumbing.toiletMovePlanned}`,
+  ].filter(Boolean)
+
+  return {
+    ...plumbing,
+    mainDrainsFound: plumbing.mainDrainsFound || (legacyDrains.length ? legacyDrains.join(', ') : 'Non visible'),
+    plannedMoves: plumbing.plannedMoves || legacyMoves.join(', '),
+  }
 }
 
 export function buildEditableUrl(id) {
@@ -325,6 +360,10 @@ export function generateSummary(draft) {
   const projectBits = [
     d.project.showerType && `douche souhaitée : ${d.project.showerType}`,
     d.project.desiredDimensions && `dimensions : ${d.project.desiredDimensions}`,
+    d.project.screen && `paroi : ${d.project.screen}`,
+    d.project.screenFinish && `finition paroi : ${d.project.screenFinish}`,
+    d.project.screenProfiles && `profilés : ${d.project.screenProfiles}`,
+    d.project.screenDimensions && `dimensions paroi : ${d.project.screenDimensions}`,
     d.project.vanity && `meuble : ${d.project.vanity}`,
     d.project.style && `style : ${d.project.style}`,
     d.project.range && `gamme : ${d.project.range}`,
@@ -341,7 +380,7 @@ export function generateSummary(draft) {
 
   const technical = [
     `supports murs A/B/C/D : ${d.structure.wallA}, ${d.structure.wallB}, ${d.structure.wallC}, ${d.structure.wallD}`,
-    `plomberie : EC ${d.plumbing.hotWaterFound}, EF ${d.plumbing.coldWaterFound}, évacuation douche ${d.plumbing.showerDrainFound}`,
+    `plomberie : EC ${d.plumbing.hotWaterFound}, EF ${d.plumbing.coldWaterFound}, évacuations ${d.plumbing.mainDrainsFound}`,
     `électricité : tableau ${d.electrical.panelAccessible || 'Non renseigné'}, terre ${d.electrical.groundPresent}`,
     d.existing.humiditySigns && `humidité : ${d.existing.humiditySigns}`,
     d.structure.pointsToCheck && `points support : ${d.structure.pointsToCheck}`,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { G } from '../utils/colors.js'
 import { compressAndUpload } from '../utils/cloudinary.js'
 import VisitPhotoGrid from './VisitPhotoGrid.jsx'
@@ -20,15 +20,17 @@ const LOCAL_CURRENT = 'fortis.visit.current'
 const localKey = id => `fortis.visit.${id}`
 
 export default function BathroomVisitForm({ token, onLogout }) {
+  const contentRef = useRef(null)
   const [step, setStep] = useState(0)
   const [draft, setDraft] = useState(() => createDraftVisitReport())
   const [affaires, setAffaires] = useState([])
   const [search, setSearch] = useState('')
+  const [draftSearch, setDraftSearch] = useState('')
+  const [remoteDrafts, setRemoteDrafts] = useState([])
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [lastLocalSave, setLastLocalSave] = useState('')
-  const [resumeId, setResumeId] = useState('')
 
   const analyzedDraft = useMemo(() => refreshDraftAnalysis(draft), [draft])
   const summary = useMemo(() => generateSummary(analyzedDraft), [analyzedDraft])
@@ -38,6 +40,10 @@ export default function BathroomVisitForm({ token, onLogout }) {
       .then(r => r.json())
       .then(data => setAffaires(Array.isArray(data) ? data : []))
       .catch(() => setAffaires([]))
+  }, [token])
+
+  useEffect(() => {
+    loadDraftList()
   }, [token])
 
   useEffect(() => {
@@ -104,6 +110,7 @@ export default function BathroomVisitForm({ token, onLogout }) {
           ...current.formData.identification,
           notionAffaireInput: affaire.notion_id,
           affNumber: affaire.aff_number,
+          affaireDescription: affaire.description || affaire.description_short || '',
           clientName: affaire.contact || current.formData.identification.clientName,
           siteAddress: affaire.adresse || current.formData.identification.siteAddress,
         },
@@ -193,7 +200,7 @@ export default function BathroomVisitForm({ token, onLogout }) {
     }))
   }
 
-  const loadRemoteDraft = async (id = resumeId) => {
+  const loadRemoteDraft = async (id) => {
     if (!id) return
     setBusy('Chargement…')
     setError('')
@@ -214,11 +221,31 @@ export default function BathroomVisitForm({ token, onLogout }) {
     }
   }
 
+  const loadDraftList = async () => {
+    try {
+      const res = await fetch('/api/visit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'listDrafts' }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.ok !== false) setRemoteDrafts(Array.isArray(data.drafts) ? data.drafts : [])
+    } catch {
+      setRemoteDrafts([])
+    }
+  }
+
+  const goStep = (nextStep) => {
+    setStep(nextStep)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+    contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const saveDraft = async ({ generatePdf = false } = {}) => {
     const current = refreshDraftAnalysis(draft)
     const id = current.formData.identification
-    if (!id.clientName || !id.siteAddress || !id.visitDate) {
-      setError('Client, adresse chantier et date de visite sont nécessaires pour enregistrer.')
+    if (!current.notionAffaireId || !id.clientName || !id.siteAddress || !id.visitDate) {
+      setError('Affaire, client, adresse chantier et date de visite sont nécessaires pour enregistrer.')
       return
     }
 
@@ -243,6 +270,7 @@ export default function BathroomVisitForm({ token, onLogout }) {
       if (!res.ok || data.ok === false) throw new Error(data.details || data.error || 'Enregistrement impossible')
       setDraft(createDraftVisitReport(data.draft || payloadDraft))
       setMessage(generatePdf ? 'PDF généré et brouillon sauvegardé.' : 'Brouillon sauvegardé dans Drive.')
+      loadDraftList()
       if (data.draft?.editableUrl) window.history.replaceState(null, '', `?id=${data.draft.id}`)
     } catch (err) {
       setError(err.message)
@@ -268,6 +296,10 @@ export default function BathroomVisitForm({ token, onLogout }) {
   }
 
   const filteredAffaires = affaires.filter(a => a.label.toLowerCase().includes(search.toLowerCase())).slice(0, 30)
+  const filteredDrafts = remoteDrafts.filter(item => {
+    const haystack = [item.affNumber, item.clientName, item.description, item.visitDate].join(' ').toLowerCase()
+    return haystack.includes(draftSearch.toLowerCase())
+  }).slice(0, 20)
   const canBack = step > 0
   const isFinal = step === VISIT_STEPS.length - 1
 
@@ -277,42 +309,54 @@ export default function BathroomVisitForm({ token, onLogout }) {
       <div style={s.progressWrap}>
         <div style={s.progressBar}><div style={{ ...s.progressFill, width: `${(step / (VISIT_STEPS.length - 1)) * 100}%` }} /></div>
         <div style={s.stepLine}>
-          <button style={s.smallGhost} onClick={() => setStep(0)}>Créer</button>
+          <button style={s.smallGhost} onClick={() => goStep(0)}>Créer</button>
           <span>{VISIT_STEPS[step]}</span>
-          <button style={s.smallGhost} onClick={() => setStep(VISIT_STEPS.length - 1)}>Synthèse</button>
+          <button style={s.smallGhost} onClick={() => goStep(VISIT_STEPS.length - 1)}>Synthèse</button>
         </div>
       </div>
 
-      <main style={s.content}>
+      <main ref={contentRef} style={s.content}>
         {error && <div style={s.errorBanner}>{error}</div>}
         {message && <div style={s.successBanner}>{message}</div>}
         {busy && <div style={s.infoBanner}>{busy}</div>}
 
         {step === 0 && (
           <Section title="Identification affaire">
-            <Field label="Reprendre une fiche existante">
-              <div style={s.row}>
-                <input style={s.input} placeholder="ID de fiche visite" value={resumeId} onChange={e => setResumeId(e.target.value)} />
-                <button style={s.inlineBtn} onClick={() => loadRemoteDraft()}>Ouvrir</button>
-              </div>
-            </Field>
-            <Field label="ID ou URL Affaire Notion">
-              <input style={s.input} placeholder="Coller l’URL ou l’ID de l’affaire" value={draft.formData.identification.notionAffaireInput} onChange={e => setNotionInput(e.target.value)} />
-            </Field>
             <Field label="Affaire existante">
               <input style={{ ...s.input, marginBottom: 8 }} placeholder="Rechercher AFF ou client" value={search} onChange={e => setSearch(e.target.value)} />
+              {!draft.notionAffaireId && !search && <div style={s.hint}>Minimum pour sauvegarder : sélectionner une affaire, client, adresse et date.</div>}
+              {draft.notionAffaireId && (
+                <div style={s.selectedAff}>
+                  <strong>{draft.formData.identification.affNumber}</strong>
+                  <span>{draft.formData.identification.clientName}</span>
+                  <small>{draft.formData.identification.affaireDescription || 'Description non renseignée'}</small>
+                </div>
+              )}
               {search && (
                 <div style={s.affList}>
                   {filteredAffaires.map(a => (
                     <button key={a.notion_id} style={s.affItem} onClick={() => chooseAffaire(a)}>
                       <strong>{a.aff_number}</strong><br />
-                      {a.description_short}<br />
-                      <span>{a.contact}</span>
+                      {a.contact}<br />
+                      <span>{a.description}</span>
                     </button>
                   ))}
                   {!filteredAffaires.length && <div style={s.hint}>Aucune affaire trouvée</div>}
                 </div>
               )}
+            </Field>
+            <Field label="Reprendre une fiche existante">
+              <input style={{ ...s.input, marginBottom: 8 }} placeholder="Rechercher AFF, cliente ou description" value={draftSearch} onChange={e => setDraftSearch(e.target.value)} />
+              <div style={s.affList}>
+                {filteredDrafts.map(item => (
+                  <button key={item.id} style={s.affItem} onClick={() => loadRemoteDraft(item.id)}>
+                    <strong>{item.affNumber || 'AFF ?'}</strong> — {item.clientName || 'Cliente non renseignée'}<br />
+                    <span>{item.description || 'Description non renseignée'}</span><br />
+                    <small>{item.visitDate || 'Date ?'} · modifié {item.updatedAt ? formatDateTime(item.updatedAt) : '—'}{item.pdfUrl ? ' · PDF généré' : ''}</small>
+                  </button>
+                ))}
+                {!filteredDrafts.length && <div style={s.hint}>Aucun brouillon Drive trouvé pour le moment.</div>}
+              </div>
             </Field>
             <TextField label="Nom client" value={draft.formData.identification.clientName} onChange={v => setField('identification', 'clientName', v)} />
             <TextField label="Adresse chantier" value={draft.formData.identification.siteAddress} onChange={v => setField('identification', 'siteAddress', v)} />
@@ -325,12 +369,12 @@ export default function BathroomVisitForm({ token, onLogout }) {
         {step === 1 && (
           <Section title="Accès chantier">
             <SelectField label="Type de logement" value={draft.formData.access.housingType} onChange={v => setField('access', 'housingType', v)} options={['', 'Appartement', 'Maison', 'Autre']} />
-            <TextField label="Étage" value={draft.formData.access.floor} onChange={v => setField('access', 'floor', v)} />
+            <TextField label="Étage" placeholder="Ex : 3e étage" value={draft.formData.access.floor} onChange={v => setField('access', 'floor', v)} />
             <SelectField label="Ascenseur" value={draft.formData.access.elevator} onChange={v => setField('access', 'elevator', v)} options={['Oui', 'Non', 'Non renseigné']} />
             <SelectField label="Stationnement" value={draft.formData.access.parking} onChange={v => setField('access', 'parking', v)} options={['Facile', 'Moyen', 'Difficile', 'Non renseigné']} />
             <SelectField label="Accès utilitaire" value={draft.formData.access.utilityAccess} onChange={v => setField('access', 'utilityAccess', v)} options={['Facile', 'Moyen', 'Difficile', 'Non renseigné']} />
             <SelectField label="Protection parties communes nécessaire" value={draft.formData.access.commonAreaProtection} onChange={v => setField('access', 'commonAreaProtection', v)} options={['Oui', 'Non', 'À confirmer']} />
-            <TextField label="Horaires copropriété" value={draft.formData.access.coproHours} onChange={v => setField('access', 'coproHours', v)} />
+            <TextField label="Horaires copropriété" placeholder="Ex : travaux autorisés 10h-17h" value={draft.formData.access.coproHours} onChange={v => setField('access', 'coproHours', v)} />
             <TextField label="Gardien / syndic" value={draft.formData.access.caretaker} onChange={v => setField('access', 'caretaker', v)} />
             <TextArea label="Contraintes bruit" value={draft.formData.access.noiseConstraints} onChange={v => setField('access', 'noiseConstraints', v)} />
             <TextArea label="Commentaires accès" value={draft.formData.access.comments} onChange={v => setField('access', 'comments', v)} />
@@ -340,14 +384,14 @@ export default function BathroomVisitForm({ token, onLogout }) {
         {step === 2 && <ExistingStep data={draft.formData.existing} setField={setField} />}
         {step === 3 && (
           <Section title="Cotes et photos">
-            <TextField label="Longueur mur A" value={draft.formData.measurements.wallA} onChange={v => setField('measurements', 'wallA', v)} />
-            <TextField label="Longueur mur B" value={draft.formData.measurements.wallB} onChange={v => setField('measurements', 'wallB', v)} />
-            <TextField label="Longueur mur C" value={draft.formData.measurements.wallC} onChange={v => setField('measurements', 'wallC', v)} />
-            <TextField label="Longueur mur D" value={draft.formData.measurements.wallD} onChange={v => setField('measurements', 'wallD', v)} />
-            <TextField label="Hauteur sous plafond" value={draft.formData.measurements.ceilingHeight} onChange={v => setField('measurements', 'ceilingHeight', v)} />
-            <TextField label="Largeur porte" value={draft.formData.measurements.doorWidth} onChange={v => setField('measurements', 'doorWidth', v)} />
-            <TextArea label="Emplacement évacuation principale" value={draft.formData.measurements.mainDrainLocation} onChange={v => setField('measurements', 'mainDrainLocation', v)} />
-            <TextArea label="Emplacement arrivées eau" value={draft.formData.measurements.waterInletLocation} onChange={v => setField('measurements', 'waterInletLocation', v)} />
+            <TextField label="Longueur mur A" placeholder="Ex : 2,40 m" value={draft.formData.measurements.wallA} onChange={v => setField('measurements', 'wallA', v)} />
+            <TextField label="Longueur mur B" placeholder="Ex : 1,80 m" value={draft.formData.measurements.wallB} onChange={v => setField('measurements', 'wallB', v)} />
+            <TextField label="Longueur mur C" placeholder="Ex : 2,40 m" value={draft.formData.measurements.wallC} onChange={v => setField('measurements', 'wallC', v)} />
+            <TextField label="Longueur mur D" placeholder="Ex : 1,80 m" value={draft.formData.measurements.wallD} onChange={v => setField('measurements', 'wallD', v)} />
+            <TextField label="Hauteur sous plafond" placeholder="Ex : 2,50 m" value={draft.formData.measurements.ceilingHeight} onChange={v => setField('measurements', 'ceilingHeight', v)} />
+            <TextField label="Largeur porte" placeholder="Ex : 73 cm" value={draft.formData.measurements.doorWidth} onChange={v => setField('measurements', 'doorWidth', v)} />
+            <TextArea label="Emplacement évacuation principale" placeholder="Ex : sol, angle mur B/C, diamètre à confirmer" value={draft.formData.measurements.mainDrainLocation} onChange={v => setField('measurements', 'mainDrainLocation', v)} />
+            <TextArea label="Emplacement arrivées eau" placeholder="Ex : mur B, à 45 cm du sol" value={draft.formData.measurements.waterInletLocation} onChange={v => setField('measurements', 'waterInletLocation', v)} />
             <TextArea label="Commentaires cotes" value={draft.formData.measurements.comments} onChange={v => setField('measurements', 'comments', v)} />
             <VisitPhotoGrid photos={draft.photos} onUpload={uploadPhoto} onStatus={setPhotoStatus} onRemove={removePhoto} />
           </Section>
@@ -370,9 +414,9 @@ export default function BathroomVisitForm({ token, onLogout }) {
       </main>
 
       <nav style={s.nav}>
-        {canBack && <button style={s.backBtn} onClick={() => setStep(x => x - 1)}>Retour</button>}
+        {canBack && <button style={s.backBtn} onClick={() => goStep(step - 1)}>Retour</button>}
         <button style={s.saveBtn} onClick={() => saveDraft()} disabled={!!busy}>Enregistrer le brouillon</button>
-        {!isFinal && <button style={s.nextBtn} onClick={() => setStep(x => x + 1)}>Suivant</button>}
+        {!isFinal && <button style={s.nextBtn} onClick={() => goStep(step + 1)}>Suivant</button>}
       </nav>
 
       <style>{`
@@ -409,7 +453,6 @@ function ExistingStep({ data, setField }) {
     <Section title="État existant">
       <SelectField label="Type de pièce" value={data.roomType} onChange={v => setField('existing', 'roomType', v)} options={['', 'Salle de bain', 'Salle d’eau', 'WC séparé', 'Suite parentale', 'Autre']} />
       <TextField label="Surface approximative" value={data.approximateSurface} onChange={v => setField('existing', 'approximateSurface', v)} />
-      <TextField label="Hauteur sous plafond" value={data.ceilingHeight} onChange={v => setField('existing', 'ceilingHeight', v)} />
       <SelectField label="Douche existante" value={data.existingShower} onChange={v => setField('existing', 'existingShower', v)} options={yn} />
       <SelectField label="Baignoire existante" value={data.existingBathtub} onChange={v => setField('existing', 'existingBathtub', v)} options={yn} />
       <SelectField label="WC existant" value={data.existingToilet} onChange={v => setField('existing', 'existingToilet', v)} options={yn} />
@@ -434,11 +477,23 @@ function StructureStep({ data, setField }) {
       {['wallA', 'wallB', 'wallC', 'wallD'].map((key, index) => (
         <SelectField key={key} label={`Nature support mur ${String.fromCharCode(65 + index)}`} value={data[key]} onChange={v => setField('structure', key, v)} options={supportOptions} />
       ))}
-      <SelectField label="Mur porteur suspecté" value={data.suspectedLoadBearing} onChange={v => setField('structure', 'suspectedLoadBearing', v)} options={confirm} />
+      <SelectField
+        label="Mur porteur ou structure à risque suspectée ?"
+        help="Mur épais, béton, bruit plein, ancienne façade, gaine technique ou doute avant ouverture."
+        value={data.suspectedLoadBearing}
+        onChange={v => setField('structure', 'suspectedLoadBearing', v)}
+        options={confirm}
+      />
       <SelectField label="Cloison à déposer" value={data.partitionToRemove} onChange={v => setField('structure', 'partitionToRemove', v)} options={confirm} />
       <SelectField label="Création de niche" value={data.nicheCreation} onChange={v => setField('structure', 'nicheCreation', v)} options={confirm} />
       <SelectField label="Renfort meuble suspendu nécessaire" value={data.suspendedVanityReinforcement} onChange={v => setField('structure', 'suspendedVanityReinforcement', v)} options={confirm} />
-      <SelectField label="Support compatible carrelage grand format" value={data.largeFormatTileCompatible} onChange={v => setField('structure', 'largeFormatTileCompatible', v)} options={confirm} />
+      <SelectField
+        label="Support assez plan/rigide pour grand format ?"
+        help="Planéité, fissures, humidité, doublage fragile, besoin ragréage ou reprise support."
+        value={data.largeFormatTileCompatible}
+        onChange={v => setField('structure', 'largeFormatTileCompatible', v)}
+        options={confirm}
+      />
       <SelectField label="Humidité visible" value={data.visibleHumidity} onChange={v => setField('structure', 'visibleHumidity', v)} options={confirm} />
       <SelectField label="Fissures visibles" value={data.visibleCracks} onChange={v => setField('structure', 'visibleCracks', v)} options={confirm} />
       <TextArea label="Points à vérifier" value={data.pointsToCheck} onChange={v => setField('structure', 'pointsToCheck', v)} />
@@ -449,21 +504,12 @@ function StructureStep({ data, setField }) {
 function PlumbingStep({ data, setField }) {
   return (
     <Section title="Plomberie">
-      {[
-        ['hotWaterFound', 'Arrivée eau chaude repérée'],
-        ['coldWaterFound', 'Arrivée eau froide repérée'],
-        ['showerDrainFound', 'Évacuation douche repérée'],
-        ['vanityDrainFound', 'Évacuation vasque repérée'],
-        ['toiletDrainFound', 'Évacuation WC repérée'],
-      ].map(([key, label]) => <SelectField key={key} label={label} value={data[key]} onChange={v => setField('plumbing', key, v)} options={['Oui', 'Non', 'Non visible']} />)}
-      {[
-        ['technicalColumnAccessible', 'Colonne technique accessible'],
-        ['showerMovePlanned', 'Déplacement douche prévu'],
-        ['vanityMovePlanned', 'Déplacement vasque prévu'],
-        ['toiletMovePlanned', 'Déplacement WC prévu'],
-      ].map(([key, label]) => <SelectField key={key} label={label} value={data[key]} onChange={v => setField('plumbing', key, v)} options={['Oui', 'Non', 'À confirmer']} />)}
+      <SelectField label="Arrivée eau chaude repérée" value={data.hotWaterFound} onChange={v => setField('plumbing', 'hotWaterFound', v)} options={['Oui', 'Non', 'Non visible']} />
+      <SelectField label="Arrivée eau froide repérée" value={data.coldWaterFound} onChange={v => setField('plumbing', 'coldWaterFound', v)} options={['Oui', 'Non', 'Non visible']} />
+      <SelectField label="Évacuations principales repérées" value={data.mainDrainsFound} onChange={v => setField('plumbing', 'mainDrainsFound', v)} options={['Oui', 'Non', 'Non visible']} />
+      <SelectField label="Colonne technique accessible" value={data.technicalColumnAccessible} onChange={v => setField('plumbing', 'technicalColumnAccessible', v)} options={['Oui', 'Non', 'À confirmer']} />
+      <TextArea label="Déplacements prévus" placeholder="Ex : douche déplacée mur C, vasque conservée, WC à confirmer" value={data.plannedMoves} onChange={v => setField('plumbing', 'plannedMoves', v)} />
       <SelectField label="Production eau chaude" value={data.hotWaterProduction} onChange={v => setField('plumbing', 'hotWaterProduction', v)} options={['Ballon', 'Chaudière', 'Collective', 'Autre', 'Inconnue']} />
-      <SelectField label="Pression testée" value={data.pressureTested} onChange={v => setField('plumbing', 'pressureTested', v)} options={['Normale', 'Faible', 'Non testée']} />
       <TextArea label="Commentaires plomberie" value={data.comments} onChange={v => setField('plumbing', 'comments', v)} />
     </Section>
   )
@@ -492,7 +538,10 @@ function ProjectStep({ data, setField }) {
     <Section title="Projet client">
       <SelectField label="Type de douche souhaitée" value={data.showerType} onChange={v => setField('project', 'showerType', v)} options={['', 'Receveur extra-plat', 'Douche à l’italienne', 'Baignoire', 'Autre']} />
       <TextField label="Dimensions souhaitées" value={data.desiredDimensions} onChange={v => setField('project', 'desiredDimensions', v)} />
-      <SelectField label="Paroi" value={data.screen} onChange={v => setField('project', 'screen', v)} options={['Fixe', 'Porte', 'Accès libre', 'À définir']} />
+      <SelectField label="Paroi - type" value={data.screen} onChange={v => setField('project', 'screen', v)} options={['Fixe', 'Porte battante', 'Porte coulissante', 'Accès libre', 'À définir']} />
+      <SelectField label="Paroi - finition" value={data.screenFinish} onChange={v => setField('project', 'screenFinish', v)} options={['Transparent', 'Fumé', 'Sérigraphié', 'Cannelé', 'À définir']} />
+      <SelectField label="Paroi - profilés" value={data.screenProfiles} onChange={v => setField('project', 'screenProfiles', v)} options={['Chromé', 'Noir', 'Laiton', 'Sans profilé', 'À définir']} />
+      <TextField label="Paroi - dimensions" placeholder="Ex : fixe 120 cm, hauteur 200 cm" value={data.screenDimensions} onChange={v => setField('project', 'screenDimensions', v)} />
       <SelectField label="Meuble" value={data.vanity} onChange={v => setField('project', 'vanity', v)} options={['Simple vasque', 'Double vasque', 'À définir']} />
       <SelectField label="Pose meuble" value={data.vanityInstall} onChange={v => setField('project', 'vanityInstall', v)} options={['Suspendu', 'Posé', 'À définir']} />
       <SelectField label="Robinetterie" value={data.taps} onChange={v => setField('project', 'taps', v)} options={['Encastrée', 'Apparente', 'À définir']} />
@@ -569,28 +618,29 @@ function Field({ label, children }) {
   )
 }
 
-function TextField({ label, value, onChange, type = 'text' }) {
+function TextField({ label, value, onChange, type = 'text', placeholder = '' }) {
   return (
     <Field label={label}>
-      <input style={s.input} type={type} value={value || ''} onChange={e => onChange(e.target.value)} />
+      <input style={s.input} type={type} placeholder={placeholder} value={value || ''} onChange={e => onChange(e.target.value)} />
     </Field>
   )
 }
 
-function TextArea({ label, value, onChange }) {
+function TextArea({ label, value, onChange, placeholder = '' }) {
   return (
     <Field label={label}>
-      <textarea style={s.textarea} rows={3} value={value || ''} onChange={e => onChange(e.target.value)} />
+      <textarea style={s.textarea} rows={3} placeholder={placeholder} value={value || ''} onChange={e => onChange(e.target.value)} />
     </Field>
   )
 }
 
-function SelectField({ label, value, onChange, options }) {
+function SelectField({ label, value, onChange, options, help = '' }) {
   return (
     <Field label={label}>
       <select style={s.input} value={value || ''} onChange={e => onChange(e.target.value)}>
         {options.map(option => <option key={option} value={option}>{option || 'Non renseigné'}</option>)}
       </select>
+      {help && <div style={s.help}>{help}</div>}
     </Field>
   )
 }
@@ -662,7 +712,9 @@ const s = {
   inlineBtn: { border: 'none', borderRadius: 4, background: G.dark, color: G.gold, padding: '0 14px', fontWeight: 700 },
   affList: { border: `0.5px solid ${G.border}`, borderRadius: 4, overflow: 'hidden', background: G.white },
   affItem: { width: '100%', textAlign: 'left', padding: 12, border: 'none', borderBottom: `0.5px solid ${G.border}`, background: G.white, color: G.ink },
+  selectedAff: { background: 'rgba(184,151,90,0.08)', border: `1px solid ${G.border}`, borderRadius: 4, padding: 12, marginBottom: 8, display: 'grid', gap: 3 },
   hint: { padding: 12, color: G.soft, fontSize: 13 },
+  help: { color: G.soft, fontSize: 12, lineHeight: 1.45, marginTop: 6 },
   nav: { position: 'fixed', left: '50%', bottom: 0, transform: 'translateX(-50%)', width: '100%', maxWidth: 680, background: G.white, borderTop: `0.5px solid ${G.border}`, display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 8, padding: '12px 12px calc(12px + env(safe-area-inset-bottom))', zIndex: 10 },
   backBtn: { border: `0.5px solid rgba(26,26,24,0.2)`, background: G.white, color: G.soft, borderRadius: 4, padding: '12px 10px' },
   saveBtn: { border: `1px solid ${G.gold}`, background: G.white, color: G.gold, borderRadius: 4, padding: '12px 10px', fontWeight: 700 },

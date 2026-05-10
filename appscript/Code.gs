@@ -16,6 +16,10 @@ function doPost(e) {
       return jsonResponse_({ ok: true, draft: loadDraft_(payload.id) });
     }
 
+    if (payload.action === 'listDrafts') {
+      return jsonResponse_({ ok: true, drafts: listDrafts_() });
+    }
+
     if (payload.action === 'saveDraft') {
       return jsonResponse_({ ok: true, draft: saveDraft_(payload.draft, payload.summary) });
     }
@@ -49,6 +53,7 @@ function validateWebhookSecret_(e, payload) {
 
 function saveDraft_(draft, summary) {
   validateDraft_(draft);
+  console.log(`saveDraft ${draft.id} ${draft.formData.identification.affNumber || ''} ${getClientName_(draft) || ''}`);
 
   const now = new Date().toISOString();
   const cleanDraft = JSON.parse(JSON.stringify(draft));
@@ -57,11 +62,11 @@ function saveDraft_(draft, summary) {
   cleanDraft.editableUrl = cleanDraft.editableUrl || buildEditableUrl_(cleanDraft.id);
 
   const folder = resolveChiffrageFolder_(cleanDraft);
-  const file = upsertTextFile_(folder, draftFileName_(cleanDraft.id), JSON.stringify(cleanDraft, null, 2), MimeType.PLAIN_TEXT);
+  const file = upsertDraftFile_(folder, cleanDraft);
 
   cleanDraft.draftFileId = file.getId();
   cleanDraft.draftFileUrl = file.getUrl();
-  upsertTextFile_(folder, draftFileName_(cleanDraft.id), JSON.stringify(cleanDraft, null, 2), MimeType.PLAIN_TEXT);
+  upsertDraftFile_(folder, cleanDraft);
 
   return cleanDraft;
 }
@@ -73,8 +78,7 @@ function generatePdf_(draft, summary) {
   const html = buildBriefHtml_(saved, summary || saved.summary || {});
   const pdfBlob = createPdfWithPdfCo_(html, saved, apiKey);
   const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmm');
-  const client = sanitizeFilename_(getClientName_(saved) || 'client');
-  const filename = `Brief-sous-traitant-${client}-${stamp}.pdf`;
+  const filename = `${buildBaseName_(saved, 'Brief sous-traitant')} - ${stamp}.pdf`;
   const file = folder.createFile(pdfBlob.setName(filename));
 
   saved.pdfUrl = file.getUrl();
@@ -83,16 +87,53 @@ function generatePdf_(draft, summary) {
   saved.status = 'pdf_generated';
   saved.summary = summary || saved.summary || {};
 
-  upsertTextFile_(folder, draftFileName_(saved.id), JSON.stringify(saved, null, 2), MimeType.PLAIN_TEXT);
+  upsertDraftFile_(folder, saved);
   return saved;
 }
 
 function loadDraft_(id) {
   if (!id) throw new Error('ID de fiche manquant.');
-  const files = DriveApp.getFilesByName(draftFileName_(id));
-  if (!files.hasNext()) throw new Error(`Fiche introuvable: ${id}`);
-  const file = files.next();
+  const file = findDraftFileById_(id);
+  if (!file) throw new Error(`Fiche introuvable: ${id}`);
   return JSON.parse(file.getBlob().getDataAsString());
+}
+
+function listDrafts_() {
+  const drafts = [];
+  const seen = {};
+  const queries = [
+    "title contains 'Fiche visite SDB' and trashed = false",
+    "title contains 'fiche-visite-' and trashed = false",
+  ];
+
+  queries.forEach(query => {
+    const files = DriveApp.searchFiles(query);
+    while (files.hasNext()) {
+      const file = files.next();
+      if (seen[file.getId()]) continue;
+      seen[file.getId()] = true;
+      try {
+        const draft = JSON.parse(file.getBlob().getDataAsString());
+        const id = draft.formData && draft.formData.identification || {};
+        drafts.push({
+          id: draft.id,
+          affNumber: id.affNumber || '',
+          clientName: id.clientName || '',
+          description: id.affaireDescription || '',
+          visitDate: id.visitDate || '',
+          updatedAt: draft.updatedAt || file.getLastUpdated().toISOString(),
+          pdfUrl: draft.pdfUrl || '',
+          fileUrl: file.getUrl(),
+          fileName: file.getName(),
+        });
+      } catch (error) {
+        console.warn(`Brouillon ignore ${file.getName()}: ${error.message}`);
+      }
+    }
+  });
+
+  drafts.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  return drafts;
 }
 
 function validateDraft_(draft) {
@@ -101,6 +142,7 @@ function validateDraft_(draft) {
   if (!identification) throw new Error('Brouillon invalide: identification manquante.');
 
   const missing = [];
+  if (!draft.notionAffaireId) missing.push('notionAffaireId');
   if (!identification.clientName) missing.push('clientName');
   if (!identification.siteAddress) missing.push('siteAddress');
   if (!identification.visitDate) missing.push('visitDate');
@@ -159,8 +201,73 @@ function upsertTextFile_(folder, filename, content, mimeType) {
   return folder.createFile(filename, content, mimeType);
 }
 
-function draftFileName_(id) {
+function upsertDraftFile_(folder, draft) {
+  const content = JSON.stringify(draft, null, 2);
+  if (draft.draftFileId) {
+    try {
+      const existing = DriveApp.getFileById(draft.draftFileId);
+      existing.setName(draftFileName_(draft));
+      existing.setContent(content);
+      return existing;
+    } catch (error) {
+      console.warn(`draftFileId invalide, recherche par nom: ${error.message}`);
+    }
+  }
+
+  const filename = draftFileName_(draft);
+  const files = folder.getFilesByName(filename);
+  if (files.hasNext()) {
+    const file = files.next();
+    file.setContent(content);
+    return file;
+  }
+
+  const legacy = folder.getFilesByName(legacyDraftFileName_(draft.id));
+  if (legacy.hasNext()) {
+    const file = legacy.next();
+    file.setName(filename);
+    file.setContent(content);
+    return file;
+  }
+
+  return folder.createFile(filename, content, MimeType.PLAIN_TEXT);
+}
+
+function findDraftFileById_(id) {
+  const legacy = DriveApp.getFilesByName(legacyDraftFileName_(id));
+  if (legacy.hasNext()) return legacy.next();
+
+  const files = DriveApp.searchFiles("title contains 'Fiche visite SDB' and trashed = false");
+  while (files.hasNext()) {
+    const file = files.next();
+    try {
+      const draft = JSON.parse(file.getBlob().getDataAsString());
+      if (draft.id === id) return file;
+    } catch (error) {
+      console.warn(`Fichier ignore ${file.getName()}: ${error.message}`);
+    }
+  }
+
+  return null;
+}
+
+function legacyDraftFileName_(id) {
   return `fiche-visite-${id}.json`;
+}
+
+function draftFileName_(draft) {
+  return `${buildBaseName_(draft, 'Fiche visite SDB')}.json`;
+}
+
+function buildBaseName_(draft, prefix) {
+  const id = draft.formData && draft.formData.identification || {};
+  const parts = [
+    prefix,
+    id.affNumber || 'AFF',
+    id.clientName || 'Cliente',
+    truncate_(id.affaireDescription || 'Description', 50),
+  ];
+  return sanitizeFilename_(parts.filter(Boolean).join(' - '));
 }
 
 function buildEditableUrl_(id) {
@@ -169,6 +276,7 @@ function buildEditableUrl_(id) {
 }
 
 function createPdfWithPdfCo_(html, draft, apiKey) {
+  console.log(`generatePdf ${draft.id} ${draft.formData.identification.affNumber || ''} ${getClientName_(draft) || ''}`);
   const response = UrlFetchApp.fetch(CONFIG.pdfCoEndpoint, {
     method: 'post',
     contentType: 'application/json',
@@ -183,18 +291,26 @@ function createPdfWithPdfCo_(html, draft, apiKey) {
     muteHttpExceptions: true,
   });
 
-  const body = JSON.parse(response.getContentText());
+  const body = parseJsonResponse_(response, 'PDF.co');
+  console.log(`PDF.co status ${response.getResponseCode()} error=${body.error ? 'true' : 'false'}`);
   if (response.getResponseCode() >= 300 || body.error) {
     throw new Error(`Erreur PDF.co: ${body.message || response.getContentText()}`);
   }
   if (!body.url) throw new Error('PDF.co n a pas retourne d URL de PDF.');
 
   const pdfResponse = UrlFetchApp.fetch(body.url, { method: 'get', muteHttpExceptions: true });
+  const contentType = String(pdfResponse.getHeaders()['Content-Type'] || pdfResponse.getHeaders()['content-type'] || '');
   if (pdfResponse.getResponseCode() >= 300) {
-    throw new Error(`Telechargement PDF impossible: ${pdfResponse.getResponseCode()}`);
+    throw new Error(`PDF.co a genere une URL non telechargeable (${pdfResponse.getResponseCode()}).`);
   }
 
-  return pdfResponse.getBlob().setContentType('application/pdf');
+  const blob = pdfResponse.getBlob().setContentType('application/pdf');
+  const sample = blob.getBytes().slice(0, 5).map(b => String.fromCharCode(b)).join('');
+  if (!contentType.toLowerCase().includes('pdf') && sample !== '%PDF-') {
+    throw new Error('PDF.co n a pas retourne un PDF telechargeable. Verifier la cle PDF.co ou relancer la generation.');
+  }
+
+  return blob;
 }
 
 function buildBriefHtml_(draft, summary) {
@@ -281,7 +397,7 @@ function getNotionPage_(pageId, token) {
     headers: { Authorization: `Bearer ${token}`, 'Notion-Version': CONFIG.notionVersion },
     muteHttpExceptions: true,
   });
-  const body = JSON.parse(response.getContentText());
+  const body = parseJsonResponse_(response, 'Notion');
   if (response.getResponseCode() >= 300) {
     throw new Error(`Erreur Notion ${response.getResponseCode()}: ${body.message || response.getContentText()}`);
   }
@@ -343,6 +459,14 @@ function getRequiredProperty_(name) {
   return value;
 }
 
+function parseJsonResponse_(response, label) {
+  try {
+    return JSON.parse(response.getContentText());
+  } catch (error) {
+    throw new Error(`${label} n a pas retourne une reponse JSON exploitable.`);
+  }
+}
+
 function getClientName_(draft) {
   return draft.formData && draft.formData.identification && draft.formData.identification.clientName;
 }
@@ -353,6 +477,11 @@ function labelize_(key) {
 
 function sanitizeFilename_(name) {
   return String(name || '').replace(/[\\/:*?"<>|]/g, '-');
+}
+
+function truncate_(value, maxLength) {
+  const text = String(value || '').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
 function escapeHtml_(value) {
@@ -373,4 +502,3 @@ function jsonResponse_(body) {
     .createTextOutput(JSON.stringify(body))
     .setMimeType(ContentService.MimeType.JSON);
 }
-
