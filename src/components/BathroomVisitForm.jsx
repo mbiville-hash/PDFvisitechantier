@@ -31,6 +31,8 @@ export default function BathroomVisitForm({ token, onLogout }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [lastLocalSave, setLastLocalSave] = useState('')
+  const [confirmPdf, setConfirmPdf] = useState(false)
+  const [completion, setCompletion] = useState(null)
 
   const analyzedDraft = useMemo(() => refreshDraftAnalysis(draft), [draft])
   const summary = useMemo(() => generateSummary(analyzedDraft), [analyzedDraft])
@@ -71,6 +73,7 @@ export default function BathroomVisitForm({ token, onLogout }) {
   }, [draft])
 
   const updateDraft = (updater) => {
+    setCompletion(null)
     setDraft(current => {
       const next = typeof updater === 'function' ? updater(current) : updater
       return refreshDraftAnalysis({ ...next, updatedAt: new Date().toISOString() })
@@ -213,9 +216,10 @@ export default function BathroomVisitForm({ token, onLogout }) {
       const data = await res.json().catch(() => ({}))
       if (!res.ok || data.ok === false) throw new Error(data.details || data.error || 'Fiche introuvable')
       setDraft(createDraftVisitReport(data.draft))
+      setCompletion(null)
       setMessage('Fiche chargée.')
     } catch (err) {
-      setError(err.message)
+      setError(cleanUiError(err.message))
     } finally {
       setBusy('')
     }
@@ -241,14 +245,24 @@ export default function BathroomVisitForm({ token, onLogout }) {
     contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  const saveDraft = async ({ generatePdf = false } = {}) => {
+  const saveDraft = async ({ generatePdf = false, forcePdf = false } = {}) => {
     const current = refreshDraftAnalysis(draft)
     const id = current.formData.identification
     if (!current.notionAffaireId || !id.clientName || !id.siteAddress || !id.visitDate) {
-      setError('Affaire, client, adresse chantier et date de visite sont nécessaires pour enregistrer.')
+      setError(`Impossible d’enregistrer pour le moment : ${getMinimumMissing(current).join(', ')}.`)
+      goStep(0)
       return
     }
 
+    if (generatePdf && !forcePdf && current.completenessStatus !== 'Complet') {
+      setConfirmPdf(true)
+      setError('')
+      setMessage('')
+      goStep(VISIT_STEPS.length - 1)
+      return
+    }
+
+    setConfirmPdf(false)
     setBusy(generatePdf ? 'Génération du PDF…' : 'Enregistrement…')
     setError('')
     setMessage('')
@@ -268,15 +282,33 @@ export default function BathroomVisitForm({ token, onLogout }) {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || data.ok === false) throw new Error(data.details || data.error || 'Enregistrement impossible')
-      setDraft(createDraftVisitReport(data.draft || payloadDraft))
+      const savedDraft = createDraftVisitReport(data.draft || payloadDraft)
+      setDraft(savedDraft)
+      setCompletion({ type: generatePdf ? 'pdf' : 'draft', draft: savedDraft, at: new Date().toISOString() })
       setMessage(generatePdf ? 'PDF généré et brouillon sauvegardé.' : 'Brouillon sauvegardé dans Drive.')
       loadDraftList()
       if (data.draft?.editableUrl) window.history.replaceState(null, '', `?id=${data.draft.id}`)
+      if (generatePdf) goStep(VISIT_STEPS.length - 1)
     } catch (err) {
-      setError(err.message)
+      setError(cleanUiError(err.message))
+      goStep(VISIT_STEPS.length - 1)
     } finally {
       setBusy('')
     }
+  }
+
+  const startNewDraft = () => {
+    const next = createDraftVisitReport()
+    setDraft(next)
+    setStep(0)
+    setSearch('')
+    setDraftSearch('')
+    setMessage('')
+    setError('')
+    setCompletion(null)
+    setConfirmPdf(false)
+    window.history.replaceState(null, '', window.location.pathname)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const copySummary = async () => {
@@ -407,16 +439,23 @@ export default function BathroomVisitForm({ token, onLogout }) {
             summary={summary}
             onSave={() => saveDraft()}
             onPdf={() => saveDraft({ generatePdf: true })}
+            onConfirmPdf={() => saveDraft({ generatePdf: true, forcePdf: true })}
+            onCancelPdf={() => setConfirmPdf(false)}
             onCopy={copySummary}
             onJson={downloadJson}
+            busy={busy}
+            confirmPdf={confirmPdf}
+            completion={completion}
+            onContinue={() => setCompletion(null)}
+            onNew={startNewDraft}
           />
         )}
       </main>
 
       <nav style={s.nav}>
-        {canBack && <button style={s.backBtn} onClick={() => goStep(step - 1)}>Retour</button>}
-        <button style={s.saveBtn} onClick={() => saveDraft()} disabled={!!busy}>Enregistrer le brouillon</button>
-        {!isFinal && <button style={s.nextBtn} onClick={() => goStep(step + 1)}>Suivant</button>}
+        {canBack && <button type="button" style={s.backBtn} onClick={() => goStep(step - 1)}>Retour</button>}
+        <button type="button" style={s.saveBtn} onClick={() => saveDraft()} disabled={!!busy}>{busy === 'Enregistrement…' ? 'Enregistrement…' : 'Enregistrer le brouillon'}</button>
+        {!isFinal && <button type="button" style={s.nextBtn} onClick={() => goStep(step + 1)}>Suivant</button>}
       </nav>
 
       <style>{`
@@ -576,12 +615,62 @@ function MaterialsStep({ materials, add, update, remove }) {
   )
 }
 
-function SummaryStep({ draft, summary, onSave, onPdf, onCopy, onJson }) {
+function SummaryStep({ draft, summary, onSave, onPdf, onConfirmPdf, onCancelPdf, onCopy, onJson, busy, confirmPdf, completion, onContinue, onNew }) {
+  const hasMissing = draft.missingFields?.length > 0
+  const hasReservations = draft.reservations?.length > 0
+  const isGenerating = busy === 'Génération du PDF…'
+  const isSaving = busy === 'Enregistrement…'
+
   return (
     <Section title="Synthèse">
+      {completion && (
+        <div style={s.confirmationBox}>
+          <div style={s.confirmationTitle}>{completion.type === 'pdf' ? 'PDF généré' : 'Brouillon enregistré'}</div>
+          <div style={s.confirmationText}>
+            {completion.type === 'pdf'
+              ? 'La fiche a été sauvegardée puis le brief sous-traitant a été généré dans Drive.'
+              : 'La fiche a été sauvegardée dans Drive. Tu peux la rouvrir plus tard depuis la liste des brouillons.'}
+          </div>
+          <div style={s.confirmationLinks}>
+            {completion.draft?.draftFileUrl && <a style={s.inlineLink} href={completion.draft.draftFileUrl} target="_blank" rel="noreferrer">Ouvrir le brouillon Drive</a>}
+            {completion.draft?.pdfUrl && <a style={s.inlineLink} href={completion.draft.pdfUrl} target="_blank" rel="noreferrer">Ouvrir le PDF</a>}
+          </div>
+          <div style={s.actionGrid}>
+            <button type="button" style={s.actionBtn} onClick={onContinue}>Continuer à modifier</button>
+            <button type="button" style={s.actionBtn} onClick={onNew}>Nouvelle fiche</button>
+          </div>
+        </div>
+      )}
       <div style={draft.completenessStatus === 'Complet' ? s.completeBox : draft.completenessStatus === 'Incomplet' ? s.warnBox : s.reserveBox}>
         Niveau de complétude : <strong>{draft.completenessStatus}</strong>
       </div>
+      {hasMissing && (
+        <ChecklistBox
+          title="Champs manquants pour un dossier complet"
+          tone="danger"
+          items={draft.missingFields}
+        />
+      )}
+      {hasReservations && (
+        <ChecklistBox
+          title="Réserves à confirmer"
+          tone="warning"
+          items={draft.reservations}
+          limit={18}
+        />
+      )}
+      {confirmPdf && (
+        <div style={s.pdfConfirmBox}>
+          <div style={s.confirmationTitle}>Générer quand même ?</div>
+          <div style={s.confirmationText}>
+            Le PDF restera possible, mais il indiquera clairement les réserves et les champs manquants.
+          </div>
+          <div style={s.actionGrid}>
+            <button type="button" style={s.actionPrimary} onClick={onConfirmPdf} disabled={!!busy}>{isGenerating ? 'Génération…' : 'Oui, générer le PDF'}</button>
+            <button type="button" style={s.actionBtn} onClick={onCancelPdf} disabled={!!busy}>Annuler</button>
+          </div>
+        </div>
+      )}
       <SummaryBlock title="Résumé projet" text={summary.projectSummary} />
       <SummaryBlock title="Contraintes chantier" text={summary.siteConstraints} />
       <SummaryBlock title="Contraintes techniques" text={summary.technicalConstraints} />
@@ -591,12 +680,26 @@ function SummaryStep({ draft, summary, onSave, onPdf, onCopy, onJson }) {
       <SummaryBlock title="Questions sous-traitant" text={summary.subcontractorQuestions} />
       {draft.pdfUrl && <a style={s.pdfLink} href={draft.pdfUrl} target="_blank" rel="noreferrer">Ouvrir le dernier PDF</a>}
       <div style={s.actionGrid}>
-        <button style={s.actionBtn} onClick={onSave}>Enregistrer le brouillon</button>
-        <button style={s.actionPrimary} onClick={onPdf}>{draft.pdfUrl ? 'Régénérer le PDF' : 'Générer le PDF même incomplet'}</button>
-        <button style={s.actionBtn} onClick={onCopy}>Copier le résumé</button>
-        <button style={s.actionBtn} onClick={onJson}>Exporter JSON</button>
+        <button type="button" style={s.actionBtn} onClick={onSave} disabled={!!busy}>{isSaving ? 'Enregistrement…' : 'Enregistrer le brouillon'}</button>
+        <button type="button" style={s.actionPrimary} onClick={onPdf} disabled={!!busy}>{isGenerating ? 'Génération…' : draft.pdfUrl ? 'Régénérer le PDF' : 'Générer le PDF même incomplet'}</button>
+        <button type="button" style={s.actionBtn} onClick={onCopy} disabled={!!busy}>Copier le résumé</button>
+        <button type="button" style={s.actionBtn} onClick={onJson} disabled={!!busy}>Exporter JSON</button>
       </div>
     </Section>
+  )
+}
+
+function ChecklistBox({ title, items, tone = 'warning', limit = 999 }) {
+  const visible = items.slice(0, limit)
+  const remaining = items.length - visible.length
+  return (
+    <div style={tone === 'danger' ? s.checklistDanger : s.checklistWarn}>
+      <div style={s.checklistTitle}>{title}</div>
+      <ul style={s.checklist}>
+        {visible.map(item => <li key={item}>{item}</li>)}
+      </ul>
+      {remaining > 0 && <div style={s.help}>+ {remaining} autre{remaining > 1 ? 's' : ''} réserve{remaining > 1 ? 's' : ''}</div>}
+    </div>
   )
 }
 
@@ -671,6 +774,25 @@ function formatDateTime(value) {
   return new Date(value).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })
 }
 
+function getMinimumMissing(draft) {
+  const id = draft.formData.identification
+  return [
+    !draft.notionAffaireId && 'affaire sélectionnée',
+    !id.clientName && 'nom client',
+    !id.siteAddress && 'adresse chantier',
+    !id.visitDate && 'date de visite',
+  ].filter(Boolean)
+}
+
+function cleanUiError(value) {
+  const raw = String(value || '').trim()
+  const lower = raw.toLowerCase()
+  if (lower.includes('<!doctype html') || lower.includes('<html') || lower.includes('page not found') || lower.includes('file you have requested does not exist')) {
+    return 'PDF.co a renvoyé une page Google Drive introuvable au lieu du PDF. Relance la génération ; si le problème revient, vérifie la clé PDF.co et l’URL du webhook Apps Script.'
+  }
+  return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 700) || 'Erreur inconnue.'
+}
+
 const s = {
   page: {
     minHeight: '100dvh',
@@ -728,6 +850,16 @@ const s = {
   summaryBlock: { background: G.white, borderLeft: `2px solid ${G.gold}`, padding: 12, marginBottom: 12, whiteSpace: 'pre-wrap' },
   summaryTitle: { color: G.gold, fontSize: 10, fontWeight: 800, letterSpacing: '0.16em', textTransform: 'uppercase', marginBottom: 7 },
   summaryText: { color: G.ink, fontSize: 13, lineHeight: 1.6 },
+  confirmationBox: { background: 'rgba(47,109,79,0.1)', border: '1px solid rgba(47,109,79,0.25)', color: G.ink, padding: 14, borderRadius: 4, marginBottom: 12 },
+  pdfConfirmBox: { background: 'rgba(184,151,90,0.12)', border: `1px solid ${G.border}`, color: G.ink, padding: 14, borderRadius: 4, marginBottom: 12 },
+  confirmationTitle: { color: G.gold, fontSize: 12, fontWeight: 800, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 7 },
+  confirmationText: { color: G.ink, fontSize: 13, lineHeight: 1.55, marginBottom: 10 },
+  confirmationLinks: { display: 'grid', gap: 8, marginBottom: 10 },
+  inlineLink: { color: G.success, fontWeight: 800, textDecoration: 'none' },
+  checklistDanger: { background: 'rgba(159,50,50,0.08)', border: '1px solid rgba(159,50,50,0.18)', color: G.ink, padding: 12, borderRadius: 4, marginBottom: 12 },
+  checklistWarn: { background: 'rgba(184,151,90,0.1)', border: `1px solid ${G.border}`, color: G.ink, padding: 12, borderRadius: 4, marginBottom: 12 },
+  checklistTitle: { color: G.gold, fontSize: 10, fontWeight: 800, letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 7 },
+  checklist: { margin: 0, paddingLeft: 18, color: G.ink, fontSize: 13, lineHeight: 1.55 },
   completeBox: { background: 'rgba(47,109,79,0.1)', color: G.success, padding: 12, borderRadius: 4, marginBottom: 12 },
   reserveBox: { background: 'rgba(184,151,90,0.14)', color: G.warning, padding: 12, borderRadius: 4, marginBottom: 12 },
   warnBox: { background: 'rgba(159,50,50,0.08)', color: G.danger, padding: 12, borderRadius: 4, marginBottom: 12 },

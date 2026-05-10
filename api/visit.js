@@ -12,6 +12,24 @@ function getWebhookUrl() {
   return url.toString()
 }
 
+function cleanRemoteError(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return 'Erreur distante sans détail.'
+
+  const lower = raw.toLowerCase()
+  if (lower.includes('<!doctype html') || lower.includes('<html') || lower.includes('page not found')) {
+    if (lower.includes('drive') || lower.includes('file you have requested does not exist')) {
+      return 'Le service PDF a renvoyé une page Google Drive introuvable au lieu du PDF. Relance la génération ; si ça revient, le lien PDF.co est expiré ou inaccessible.'
+    }
+    return 'Le service distant a renvoyé une page HTML au lieu d’une réponse exploitable. Vérifie le déploiement Apps Script et relance.'
+  }
+
+  return raw
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 700)
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
 
@@ -27,17 +45,22 @@ export default async function handler(req, res) {
 
     const body = await response.text()
     if (!response.ok) {
-      return res.status(502).json({ error: 'Erreur webhook', details: body })
+      return res.status(502).json({ error: 'Erreur webhook', details: cleanRemoteError(body) })
     }
 
-    const parsed = body ? JSON.parse(body) : {}
+    let parsed = {}
+    try {
+      parsed = body ? JSON.parse(body) : {}
+    } catch {
+      return res.status(502).json({ error: 'Réponse Apps Script illisible', details: cleanRemoteError(body) })
+    }
+
     if (parsed.ok === false) {
-      return res.status(502).json({ error: 'Erreur Apps Script', details: parsed.error })
+      return res.status(502).json({ error: 'Erreur Apps Script', details: cleanRemoteError(parsed.error) })
     }
 
     res.status(200).json(parsed)
   } catch (error) {
-    res.status(500).json({ error: 'Erreur serveur', details: error.message })
+    res.status(500).json({ error: 'Erreur serveur', details: cleanRemoteError(error.message) })
   }
 }
-

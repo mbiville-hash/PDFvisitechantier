@@ -16,7 +16,7 @@ export const VISIT_STEPS = [
  * @typedef {'Incomplet'|'Exploitable avec réserves'|'Complet'} CompletenessStatus
  * @typedef {{key:string,label:string,status:string,url:string,preview:string,uploadedAt:string,uploading?:boolean}} VisitPhoto
  * @typedef {{id:string,category:string,provider:string,brand:string,reference:string,finish:string,dimension:string,status:string,comment:string}} MaterialSelection
- * @typedef {{id:string,notionAffaireId:string,status:DraftVisitStatus,createdAt:string,updatedAt:string,lastPdfGeneratedAt:string,pdfUrl:string,editableUrl:string,formData:object,photos:Record<string,VisitPhoto>,completenessStatus:CompletenessStatus,blockingPoints:string[],materialSelectionStatus:string}} DraftVisitReport
+ * @typedef {{id:string,notionAffaireId:string,status:DraftVisitStatus,createdAt:string,updatedAt:string,lastPdfGeneratedAt:string,pdfUrl:string,editableUrl:string,formData:object,photos:Record<string,VisitPhoto>,completenessStatus:CompletenessStatus,missingFields:string[],reservations:string[],blockingPoints:string[],materialSelectionStatus:string}} DraftVisitReport
  */
 
 export const INTERNAL_STATUS_LABELS = {
@@ -216,6 +216,8 @@ export function createDraftVisitReport(seed = {}) {
     formData: normalizeFormData(seed.formData),
     photos: seed.photos || createInitialPhotos(),
     completenessStatus: seed.completenessStatus || 'Incomplet',
+    missingFields: seed.missingFields || [],
+    reservations: seed.reservations || [],
     blockingPoints: seed.blockingPoints || [],
     materialSelectionStatus: seed.materialSelectionStatus || 'À choisir',
   }
@@ -273,6 +275,8 @@ export function refreshDraftAnalysis(draft) {
     ...draft,
     editableUrl: draft.editableUrl || buildEditableUrl(draft.id),
     completenessStatus: analysis.status,
+    missingFields: analysis.missing,
+    reservations: analysis.reservations,
     blockingPoints: analysis.blockingPoints,
     materialSelectionStatus,
   }

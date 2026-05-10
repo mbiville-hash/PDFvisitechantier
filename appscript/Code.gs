@@ -31,7 +31,7 @@ function doPost(e) {
     throw new Error(`Action inconnue: ${payload.action}`);
   } catch (error) {
     console.error(error.stack || error);
-    return jsonResponse_({ ok: false, error: error.message });
+    return jsonResponse_({ ok: false, error: cleanErrorMessage_(error) });
   }
 }
 
@@ -294,7 +294,7 @@ function createPdfWithPdfCo_(html, draft, apiKey) {
   const body = parseJsonResponse_(response, 'PDF.co');
   console.log(`PDF.co status ${response.getResponseCode()} error=${body.error ? 'true' : 'false'}`);
   if (response.getResponseCode() >= 300 || body.error) {
-    throw new Error(`Erreur PDF.co: ${body.message || response.getContentText()}`);
+    throw new Error(`Erreur PDF.co: ${body.message || 'conversion impossible'}`);
   }
   if (!body.url) throw new Error('PDF.co n a pas retourne d URL de PDF.');
 
@@ -307,6 +307,10 @@ function createPdfWithPdfCo_(html, draft, apiKey) {
   const blob = pdfResponse.getBlob().setContentType('application/pdf');
   const sample = blob.getBytes().slice(0, 5).map(b => String.fromCharCode(b)).join('');
   if (!contentType.toLowerCase().includes('pdf') && sample !== '%PDF-') {
+    const textSample = pdfResponse.getContentText().slice(0, 300);
+    if (looksLikeHtml_(textSample)) {
+      throw new Error('PDF.co a renvoye une page Google Drive introuvable au lieu du PDF. Relancer la generation; si le probleme revient, verifier la cle PDF.co.');
+    }
     throw new Error('PDF.co n a pas retourne un PDF telechargeable. Verifier la cle PDF.co ou relancer la generation.');
   }
 
@@ -465,6 +469,23 @@ function parseJsonResponse_(response, label) {
   } catch (error) {
     throw new Error(`${label} n a pas retourne une reponse JSON exploitable.`);
   }
+}
+
+function cleanErrorMessage_(error) {
+  const message = String(error && error.message ? error.message : error || '').trim();
+  if (!message) return 'Erreur inconnue.';
+  if (looksLikeHtml_(message)) {
+    if (message.indexOf('Drive') !== -1 || message.indexOf('file you have requested does not exist') !== -1 || message.indexOf('Page Not Found') !== -1) {
+      return 'PDF.co a renvoye une page Google Drive introuvable au lieu du PDF. Relancer la generation; si le probleme revient, verifier la cle PDF.co.';
+    }
+    return 'Un service distant a renvoye une page HTML au lieu d une reponse exploitable.';
+  }
+  return message.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').substring(0, 700);
+}
+
+function looksLikeHtml_(value) {
+  const text = String(value || '').toLowerCase();
+  return text.indexOf('<!doctype html') !== -1 || text.indexOf('<html') !== -1 || text.indexOf('page not found') !== -1;
 }
 
 function getClientName_(draft) {
